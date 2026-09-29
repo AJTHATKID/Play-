@@ -7,7 +7,7 @@ on:
 
 jobs:
   build_stikdebug_ios:
-    runs-on: macos-15
+    runs-on: macos-latest
     steps:
       - name: Checkout patch host
         uses: actions/checkout@v7
