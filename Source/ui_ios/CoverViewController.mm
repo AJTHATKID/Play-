@@ -113,281 +113,60 @@ static bool IsJitAvailable()
 
 @interface CoverViewController ()
 - (void)beginStikDebugJitLaunch:(id)sender;
-- (void)pollForJitAndLaunch:(id)sender alert:(UIAlertController*)alert attemptsRemaining:(NSInteger)attempts;
-@end
-
-@implementation CoverViewController
-
-static NSString* const reuseIdentifier = @"coverCell";
-
-- (void)buildCollectionWithForcedFullScan:(BOOL)forceFullDeviceScan
-{
-	UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Building collection" message:@"Please wait..." preferredStyle:UIAlertControllerStyleAlert];
-
-	CGRect aivRect = CGRectMake(0, 0, 40, 40);
-
-	UIActivityIndicatorView* aiv = [[UIActivityIndicatorView alloc] initWithFrame:aivRect];
-	[aiv startAnimating];
-
-	UIViewController* vc = [[UIViewController alloc] init];
-	vc.preferredContentSize = aivRect.size;
-	[vc.view addSubview:aiv];
-	[alert setValue:vc forKey:@"contentViewController"];
-
-	[self presentViewController:alert animated:YES completion:nil];
-
-	dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
-	dispatch_async(queue, ^{
-	  auto activeDirs = GetActiveBootableDirectories();
-	  if(forceFullDeviceScan)
-	  {
-		  dispatch_async(dispatch_get_main_queue(), ^{
-			alert.message = @"Scanning games on filesystem...";
-		  });
-		  ScanBootables("/private/var/mobile");
-	  }
-	  else if(!activeDirs.empty())
-	  {
-		  dispatch_async(dispatch_get_main_queue(), ^{
-			alert.message = @"Scanning games in active directories...";
-		  });
-		  for(const auto& activeDir : activeDirs)
-		  {
-			  ScanBootables(activeDir, false);
-		  }
-	  }
-
-	  //Always scan games in app storage. The app's path change when it's reinstalled,
-	  //thus, games from the previous installation won't be found (will be deleted in PurgeInexistingFiles).
-	  dispatch_async(dispatch_get_main_queue(), ^{
-		alert.message = @"Scanning games in app storage...";
-	  });
-	  ScanBootables(Framework::PathUtils::GetPersonalDataPath());
-
-	  dispatch_async(dispatch_get_main_queue(), ^{
-		alert.message = @"Purging inexisting files...";
-	  });
-	  PurgeInexistingFiles();
-
-	  dispatch_async(dispatch_get_main_queue(), ^{
-		alert.message = @"Fetching game titles...";
-	  });
-	  FetchGameTitles();
-
-	  if(_bootables)
-	  {
-		  delete _bootables;
-		  _bootables = nullptr;
-	  }
-	  _bootables = new BootableArray(BootablesDb::CClient::GetInstance().GetBootables());
-
-	  //Done
-	  dispatch_async(dispatch_get_main_queue(), ^{
-		[alert dismissViewControllerAnimated:YES completion:nil];
-		[self.collectionView reloadData];
-	  });
-	});
-}
-
-- (void)viewDidLoad
-{
-	[super viewDidLoad];
-
-	CAGradientLayer* bgLayer = [BackgroundLayer blueGradient];
-	bgLayer.frame = self.view.bounds;
-	[self.view.layer insertSublayer:bgLayer atIndex:0];
-
-	self.collectionView.allowsMultipleSelection = NO;
-	if(@available(iOS 11.0, *))
-	{
-		self.collectionView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAlways;
-	}
-
-	[[AltServerJitService sharedAltServerJitService] startProcess];
-	[self buildCollectionWithForcedFullScan:NO];
-}
-
-- (void)viewDidUnload
-{
-	assert(_bootables != nullptr);
-	delete _bootables;
-
-	[super viewDidUnload];
-}
-
-- (void)willAnimateRotationToInterfaceOrientation:(UIInterfaceOrientation)toInterfaceOrientation duration:(NSTimeInterval)duration
-{
-	// resize your layers based on the view’s new bounds
-	[[[self.view.layer sublayers] objectAtIndex:0] setFrame:self.view.bounds];
-}
-
-- (BOOL)shouldAutorotate
-{
-	if([self isViewLoaded] && self.view.window)
-	{
-		return YES;
-	}
-	else
-	{
-		return NO;
-	}
-}
-
-#pragma mark <UICollectionViewDataSource>
-
-- (NSInteger)numberOfSectionsInCollectionView:(UICollectionView*)collectionView
-{
-	return 1;
-}
-
-- (NSString*)collectionView:(UICollectionView*)collectionView titleForHeaderInSection:(NSInteger)section
-{
-	return @"";
-}
-
-- (NSInteger)collectionView:(UICollectionView*)collectionView numberOfItemsInSection:(NSInteger)section
-{
-	return _bootables ? _bootables->size() : 0;
-}
-
-- (UICollectionViewCell*)collectionView:(UICollectionView*)collectionView cellForItemAtIndexPath:(NSIndexPath*)indexPath
-{
-	CoverViewCell* cell = (CoverViewCell*)[collectionView dequeueReusableCellWithReuseIdentifier:reuseIdentifier forIndexPath:indexPath];
-
-	auto bootable = (*_bootables)[indexPath.row];
-	UIImage* placeholder = [UIImage imageNamed:@"boxart.png"];
-	cell.nameLabel.text = [NSString stringWithUTF8String:bootable.title.c_str()];
-	cell.backgroundView = [[UIImageView alloc] initWithImage:placeholder];
-
-	if(!bootable.coverUrl.empty())
-	{
-		NSString* coverUrl = [NSString stringWithUTF8String:bootable.coverUrl.c_str()];
-		[(UIImageView*)cell.backgroundView sd_setImageWithURL:[NSURL URLWithString:coverUrl] placeholderImage:placeholder];
-	}
-
-	return cell;
-}
-
-- (void)beginStikDebugJitLaunch:(id)sender
-{
-	NSString* bundleID = GetProcessBundleIDForStikDebug();
-	if(bundleID == nil) return;
-
-	UIAlertController* progressAlert =
-	    [UIAlertController alertControllerWithTitle:@"Enabling JIT"
-	                                      message:@"Opening StikDebug and preparing executable memory..."
-	                               preferredStyle:UIAlertControllerStyleAlert];
-
-	UIActivityIndicatorView* spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
-	[spinner startAnimating];
-	spinner.translatesAutoresizingMaskIntoConstraints = NO;
-	[progressAlert.view addSubview:spinner];
-	[NSLayoutConstraint activateConstraints:@[
-		[spinner.centerXAnchor constraintEqualToAnchor:progressAlert.view.centerXAnchor],
-		[spinner.bottomAnchor constraintEqualToAnchor:progressAlert.view.bottomAnchor constant:-18],
-	]];
-
-	[self presentViewController:progressAlert animated:YES completion:^{
-	  NSURLComponents* components = [[NSURLComponents alloc] init];
-	  // LiveContainer/FlekDeck uses the stikjit:// scheme for StikDebug. Newer
-	  // standalone StikDebug also accepts stikdebug://, so use stikjit first and
-	  // automatically fall back to stikdebug for compatibility with both setups.
-	  components.scheme = @"stikjit";
-	  components.host = @"enable-jit";
-	  components.queryItems = @[
-		  [NSURLQueryItem queryItemWithName:@"bundle-id" value:bundleID],
-		  [NSURLQueryItem queryItemWithName:@"pid" value:[NSString stringWithFormat:@"%d", getpid()]],
-		  [NSURLQueryItem queryItemWithName:@"script-name" value:@"universal.js"],
-	  ];
-
-	  NSURL* primaryURL = components.URL;
-	  components.scheme = @"stikdebug";
-	  NSURL* fallbackURL = components.URL;
-	  if(primaryURL == nil || fallbackURL == nil)
-	  {
-		  [progressAlert dismissViewControllerAnimated:YES completion:nil];
-		  return;
-	  }
-
-	  void (^beginPolling)(void) = ^{
-	    [self pollForJitAndLaunch:sender alert:progressAlert attemptsRemaining:80];
-	  };
-
-	  PublishStikDebugDirectRequest();
-
-	  [[UIApplication sharedApplication] openURL:primaryURL
-	                                    options:@{}
-	                          completionHandler:^(BOOL success) {
-	                            if(success)
-	                            {
-		                            beginPolling();
-		                            return;
-	                            }
-
-	                            // Older or differently packaged StikDebug builds
-	                            // may expose only the stikdebug:// alias.
-	                            [[UIApplication sharedApplication] openURL:fallbackURL
-	                                                              options:@{}
-	                                                    completionHandler:^(BOOL fallbackSuccess) {
-	                                                      if(fallbackSuccess)
-	                                                      {
-		                                                      beginPolling();
-		                                                      return;
-	                                                      }
-
-	                                                      if(OpenStikDebugDirectly())
-	                                                      {
-		                                                      beginPolling();
-		                                                      return;
-	                                                      }
-
-	                                                      [progressAlert dismissViewControllerAnimated:YES completion:^{
-		                                                      UIAlertController* error =
-		                                                          [UIAlertController alertControllerWithTitle:@"Couldn't reach StikDebug"
-		                                                                                            message:@"iOS couldn't open StikDebug by URL scheme or bundle ID. Install the patched StikDebug as a standalone app, not inside FlekDeck."
-		                                                                                     preferredStyle:UIAlertControllerStyleAlert];
-		                                                      [error addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-		                                                      [self presentViewController:error animated:YES completion:nil];
-	                                                      }];
-	                                                    }];
-	                          }];
-	}];
-}
-
 - (void)pollForJitAndLaunch:(id)sender alert:(UIAlertController*)alert attemptsRemaining:(NSInteger)attempts
 {
-	if(!MemFunc_IsJitReady())
-	{
-		MemFunc_InitJitArena();
-	}
+	UIApplication* application = [UIApplication sharedApplication];
+	__block UIBackgroundTaskIdentifier backgroundTask = UIBackgroundTaskInvalid;
+	backgroundTask = [application beginBackgroundTaskWithExpirationHandler:^{
+	  if(backgroundTask != UIBackgroundTaskInvalid)
+	  {
+		  [application endBackgroundTask:backgroundTask];
+		  backgroundTask = UIBackgroundTaskInvalid;
+	  }
+	}];
 
-	if(MemFunc_IsJitReady())
-	{
-		[alert dismissViewControllerAnimated:YES completion:^{
-		  [self performSegueWithIdentifier:@"showEmulator" sender:sender];
-		}];
-		return;
-	}
+	// The target must execute the universal JIT breakpoints while StikDebug is
+	// in the foreground. Keep this work off the main queue so iOS can continue
+	// the handshake during the app switch.
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+	  NSInteger remaining = attempts;
+	  while(remaining-- > 0 && !MemFunc_IsJitReady())
+	  {
+		  MemFunc_InitJitArena();
+		  if(MemFunc_IsJitReady()) break;
+		  usleep(250000);
+	  }
 
-	if(attempts <= 0)
-	{
-		NSString* status = [NSString stringWithUTF8String:MemFunc_GetJitStatus()];
-		NSString* message = [NSString stringWithFormat:@"JIT did not become ready. %@\n\nKeep LocalDevVPN connected and make sure StikDebug can attach with universal.js.", status];
-		[alert dismissViewControllerAnimated:YES completion:^{
-		  UIAlertController* error =
-		      [UIAlertController alertControllerWithTitle:@"JIT setup failed"
-		                                        message:message
-		                                 preferredStyle:UIAlertControllerStyleAlert];
-		  [error addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-		  [self presentViewController:error animated:YES completion:nil];
-		}];
-		return;
-	}
+	  const bool ready = MemFunc_IsJitReady();
+	  const char* statusCString = MemFunc_GetJitStatus();
+	  NSString* status = statusCString ? [NSString stringWithUTF8String:statusCString] : @"jit: unknown";
 
-	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(250 * NSEC_PER_MSEC)),
-	               dispatch_get_main_queue(), ^{
-	                 [self pollForJitAndLaunch:sender alert:alert attemptsRemaining:(attempts - 1)];
-	               });
+	  dispatch_async(dispatch_get_main_queue(), ^{
+		  if(backgroundTask != UIBackgroundTaskInvalid)
+		  {
+			  [application endBackgroundTask:backgroundTask];
+			  backgroundTask = UIBackgroundTaskInvalid;
+		  }
+
+		  if(ready)
+		  {
+			  [alert dismissViewControllerAnimated:YES completion:^{
+			    [self performSegueWithIdentifier:@"showEmulator" sender:sender];
+			  }];
+			  return;
+		  }
+
+		  NSString* message = [NSString stringWithFormat:@"JIT did not become ready. %@\n\nKeep LocalDevVPN connected and use the patched StikDebug build.", status];
+		  [alert dismissViewControllerAnimated:YES completion:^{
+			  UIAlertController* error =
+			      [UIAlertController alertControllerWithTitle:@"JIT setup failed"
+			                                        message:message
+			                                 preferredStyle:UIAlertControllerStyleAlert];
+			  [error addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+			  [self presentViewController:error animated:YES completion:nil];
+		  }];
+	  });
+	});
 }
 
 #pragma mark <UICollectionViewDelegate>
