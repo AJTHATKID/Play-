@@ -27,6 +27,7 @@
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>stikdebug</string>
+		<string>stikjit</string>
 	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
