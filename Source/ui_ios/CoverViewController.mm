@@ -262,7 +262,10 @@ static NSString* const reuseIdentifier = @"coverCell";
 
 	[self presentViewController:progressAlert animated:YES completion:^{
 	  NSURLComponents* components = [[NSURLComponents alloc] init];
-	  components.scheme = @"stikdebug";
+	  // LiveContainer/FlekDeck uses the stikjit:// scheme for StikDebug. Newer
+	  // standalone StikDebug also accepts stikdebug://, so use stikjit first and
+	  // automatically fall back to stikdebug for compatibility with both setups.
+	  components.scheme = @"stikjit";
 	  components.host = @"enable-jit";
 	  components.queryItems = @[
 		  [NSURLQueryItem queryItemWithName:@"bundle-id" value:bundleID],
@@ -270,29 +273,48 @@ static NSString* const reuseIdentifier = @"coverCell";
 		  [NSURLQueryItem queryItemWithName:@"script-name" value:@"universal.js"],
 	  ];
 
-	  NSURL* url = components.URL;
-	  if(url == nil)
+	  NSURL* primaryURL = components.URL;
+	  components.scheme = @"stikdebug";
+	  NSURL* fallbackURL = components.URL;
+	  if(primaryURL == nil || fallbackURL == nil)
 	  {
 		  [progressAlert dismissViewControllerAnimated:YES completion:nil];
 		  return;
 	  }
 
-	  [[UIApplication sharedApplication] openURL:url
+	  void (^beginPolling)(void) = ^{
+	    [self pollForJitAndLaunch:sender alert:progressAlert attemptsRemaining:80];
+	  };
+
+	  [[UIApplication sharedApplication] openURL:primaryURL
 	                                    options:@{}
 	                          completionHandler:^(BOOL success) {
-	                            if(!success)
+	                            if(success)
 	                            {
-		                            [progressAlert dismissViewControllerAnimated:YES completion:^{
-		                              UIAlertController* error =
-		                                  [UIAlertController alertControllerWithTitle:@"Couldn't open StikDebug"
-		                                                                    message:@"Make sure StikDebug is installed, then try launching the game again."
-		                                                             preferredStyle:UIAlertControllerStyleAlert];
-		                              [error addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-		                              [self presentViewController:error animated:YES completion:nil];
-		                            }];
+		                            beginPolling();
 		                            return;
 	                            }
-	                            [self pollForJitAndLaunch:sender alert:progressAlert attemptsRemaining:80];
+
+	                            // Older or differently packaged StikDebug builds
+	                            // may expose only the stikdebug:// alias.
+	                            [[UIApplication sharedApplication] openURL:fallbackURL
+	                                                              options:@{}
+	                                                    completionHandler:^(BOOL fallbackSuccess) {
+	                                                      if(fallbackSuccess)
+	                                                      {
+		                                                      beginPolling();
+		                                                      return;
+	                                                      }
+
+	                                                      [progressAlert dismissViewControllerAnimated:YES completion:^{
+		                                                      UIAlertController* error =
+		                                                          [UIAlertController alertControllerWithTitle:@"Couldn't reach StikDebug"
+		                                                                                            message:@"Neither the stikjit:// nor stikdebug:// handoff was accepted. Open StikDebug once, then return to Play! and retry."
+		                                                                                     preferredStyle:UIAlertControllerStyleAlert];
+		                                                      [error addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+		                                                      [self presentViewController:error animated:YES completion:nil];
+	                                                      }];
+	                                                    }];
 	                          }];
 	}];
 }
