@@ -10,6 +10,8 @@
 #import "AltServerJitService.h"
 #include "../../deps/CodeGen/include/MemoryFunction.h"
 #include <dlfcn.h>
+#include <notify.h>
+#include <objc/message.h>
 
 static NSString* GetProcessBundleIDForStikDebug()
 {
@@ -54,6 +56,31 @@ static NSString* GetProcessBundleIDForStikDebug()
 		dlclose(security);
 	}
 	return [[NSBundle mainBundle] bundleIdentifier];
+}
+
+static void PublishStikDebugDirectRequest()
+{
+	int token = 0;
+	const char* name = "com.ajthatkid.playjit.pid";
+	if(notify_register_check(name, &token) == NOTIFY_STATUS_OK)
+	{
+		notify_set_state(token, static_cast<uint64_t>(getpid()));
+		notify_post(name);
+		notify_cancel(token);
+	}
+}
+
+static bool OpenStikDebugDirectly()
+{
+	Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+	if(workspaceClass == Nil) return false;
+	SEL defaultWorkspaceSel = NSSelectorFromString(@"defaultWorkspace");
+	if(![workspaceClass respondsToSelector:defaultWorkspaceSel]) return false;
+	id workspace = ((id(*)(id, SEL))objc_msgSend)((id)workspaceClass, defaultWorkspaceSel);
+	if(workspace == nil) return false;
+	SEL openSel = NSSelectorFromString(@"openApplicationWithBundleID:");
+	if(![workspace respondsToSelector:openSel]) return false;
+	return ((BOOL(*)(id, SEL, id))objc_msgSend)(workspace, openSel, @"com.stik.stikdebug") == YES;
 }
 
 static bool IsJitAvailable()
@@ -286,6 +313,8 @@ static NSString* const reuseIdentifier = @"coverCell";
 	    [self pollForJitAndLaunch:sender alert:progressAlert attemptsRemaining:80];
 	  };
 
+	  PublishStikDebugDirectRequest();
+
 	  [[UIApplication sharedApplication] openURL:primaryURL
 	                                    options:@{}
 	                          completionHandler:^(BOOL success) {
@@ -306,10 +335,16 @@ static NSString* const reuseIdentifier = @"coverCell";
 		                                                      return;
 	                                                      }
 
+	                                                      if(OpenStikDebugDirectly())
+	                                                      {
+		                                                      beginPolling();
+		                                                      return;
+	                                                      }
+
 	                                                      [progressAlert dismissViewControllerAnimated:YES completion:^{
 		                                                      UIAlertController* error =
 		                                                          [UIAlertController alertControllerWithTitle:@"Couldn't reach StikDebug"
-		                                                                                            message:@"Neither the stikjit:// nor stikdebug:// handoff was accepted. Open StikDebug once, then return to Play! and retry."
+		                                                                                            message:@"iOS couldn't open StikDebug by URL scheme or bundle ID. Install the patched StikDebug as a standalone app, not inside FlekDeck."
 		                                                                                     preferredStyle:UIAlertControllerStyleAlert];
 		                                                      [error addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
 		                                                      [self presentViewController:error animated:YES completion:nil];
