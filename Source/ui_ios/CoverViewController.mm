@@ -13,14 +13,21 @@
 static bool IsJitAvailable()
 {
 	if(MemFunc_IsJitReady()) return true;
-	//If ppid != 1, it means we're being run in the debugger
+
+	// On iOS/iPadOS 26+, a debugger flag by itself is not enough. The executable
+	// arena must actually be prepared through the universal StikDebug protocol.
+	if(@available(iOS 26.0, *))
+	{
+		return false;
+	}
+
+	// Legacy paths remain valid on older systems.
 	if(getppid() != 1) return true;
 	if([[AltServerJitService sharedAltServerJitService] jitEnabled])
 	{
 		return true;
 	}
 	{
-		//Check if we can scan the mobile directory (only possible if jailbroken)
 		std::error_code errorCode;
 		fs::directory_iterator dirIterator("/private/var/mobile", errorCode);
 		if(!errorCode)
@@ -32,7 +39,8 @@ static bool IsJitAvailable()
 }
 
 @interface CoverViewController ()
-
+- (void)beginStikDebugJitLaunch:(id)sender;
+- (void)pollForJitAndLaunch:(id)sender alert:(UIAlertController*)alert attemptsRemaining:(NSInteger)attempts;
 @end
 
 @implementation CoverViewController
@@ -187,42 +195,125 @@ static NSString* const reuseIdentifier = @"coverCell";
 	return cell;
 }
 
+- (void)beginStikDebugJitLaunch:(id)sender
+{
+	NSString* bundleID = [[NSBundle mainBundle] bundleIdentifier];
+	if(bundleID == nil) return;
+
+	UIAlertController* progressAlert =
+	    [UIAlertController alertControllerWithTitle:@"Enabling JIT"
+	                                      message:@"Opening StikDebug and preparing executable memory..."
+	                               preferredStyle:UIAlertControllerStyleAlert];
+
+	UIActivityIndicatorView* spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+	[spinner startAnimating];
+	spinner.translatesAutoresizingMaskIntoConstraints = NO;
+	[progressAlert.view addSubview:spinner];
+	[NSLayoutConstraint activateConstraints:@[
+		[spinner.centerXAnchor constraintEqualToAnchor:progressAlert.view.centerXAnchor],
+		[spinner.bottomAnchor constraintEqualToAnchor:progressAlert.view.bottomAnchor constant:-18],
+	]];
+
+	[self presentViewController:progressAlert animated:YES completion:^{
+	  NSURLComponents* components = [[NSURLComponents alloc] init];
+	  components.scheme = @"stikdebug";
+	  components.host = @"enable-jit";
+	  components.queryItems = @[
+		  [NSURLQueryItem queryItemWithName:@"bundle-id" value:bundleID],
+		  [NSURLQueryItem queryItemWithName:@"pid" value:[NSString stringWithFormat:@"%d", getpid()]],
+		  [NSURLQueryItem queryItemWithName:@"script-name" value:@"universal.js"],
+	  ];
+
+	  NSURL* url = components.URL;
+	  if(url == nil)
+	  {
+		  [progressAlert dismissViewControllerAnimated:YES completion:nil];
+		  return;
+	  }
+
+	  [[UIApplication sharedApplication] openURL:url
+	                                    options:@{}
+	                          completionHandler:^(BOOL success) {
+	                            if(!success)
+	                            {
+		                            [progressAlert dismissViewControllerAnimated:YES completion:^{
+		                              UIAlertController* error =
+		                                  [UIAlertController alertControllerWithTitle:@"Couldn't open StikDebug"
+		                                                                    message:@"Make sure StikDebug is installed, then try launching the game again."
+		                                                             preferredStyle:UIAlertControllerStyleAlert];
+		                              [error addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+		                              [self presentViewController:error animated:YES completion:nil];
+		                            }];
+		                            return;
+	                            }
+	                            [self pollForJitAndLaunch:sender alert:progressAlert attemptsRemaining:80];
+	                          }];
+	}];
+}
+
+- (void)pollForJitAndLaunch:(id)sender alert:(UIAlertController*)alert attemptsRemaining:(NSInteger)attempts
+{
+	if(!MemFunc_IsJitReady())
+	{
+		MemFunc_InitJitArena();
+	}
+
+	if(MemFunc_IsJitReady())
+	{
+		[alert dismissViewControllerAnimated:YES completion:^{
+		  [self performSegueWithIdentifier:@"showEmulator" sender:sender];
+		}];
+		return;
+	}
+
+	if(attempts <= 0)
+	{
+		NSString* status = [NSString stringWithUTF8String:MemFunc_GetJitStatus()];
+		NSString* message = [NSString stringWithFormat:@"JIT did not become ready. %@\n\nKeep LocalDevVPN connected and make sure StikDebug can attach with universal.js.", status];
+		[alert dismissViewControllerAnimated:YES completion:^{
+		  UIAlertController* error =
+		      [UIAlertController alertControllerWithTitle:@"JIT setup failed"
+		                                        message:message
+		                                 preferredStyle:UIAlertControllerStyleAlert];
+		  [error addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+		  [self presentViewController:error animated:YES completion:nil];
+		}];
+		return;
+	}
+
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(250 * NSEC_PER_MSEC)),
+	               dispatch_get_main_queue(), ^{
+	                 [self pollForJitAndLaunch:sender alert:alert attemptsRemaining:(attempts - 1)];
+	               });
+}
+
 #pragma mark <UICollectionViewDelegate>
 
 - (BOOL)shouldPerformSegueWithIdentifier:(NSString*)identifier sender:(id)sender
 {
-	if([identifier isEqualToString:@"showEmulator"] && !IsJitAvailable())
+	if(![identifier isEqualToString:@"showEmulator"]) return YES;
+
+	// If a compatible debugger is already attached, this prepares the arena now.
+	if(!MemFunc_IsJitReady())
 	{
-		UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"JIT unavailable" message:@"JIT doesn't seem to be available at the moment. If JIT is not available, the emulator will crash. Do you wish to continue?" preferredStyle:UIAlertControllerStyleAlert];
-		{
-			UIAlertAction* continueAction = [UIAlertAction
-			    actionWithTitle:@"Continue"
-			              style:UIAlertActionStyleDefault
-			            handler:^(UIAlertAction*) {
-				          [self performSegueWithIdentifier:@"showEmulator" sender:sender];
-			            }];
-			[alert addAction:continueAction];
-		}
-		{
-			UIAlertAction* cancelAction = [UIAlertAction
-			    actionWithTitle:@"Cancel"
-			              style:UIAlertActionStyleCancel
-			            handler:^(UIAlertAction*){}];
-			[alert addAction:cancelAction];
-		}
-		{
-			UIAlertAction* helpAction = [UIAlertAction
-			    actionWithTitle:@"Help"
-			              style:UIAlertActionStyleDefault
-			            handler:^(UIAlertAction*) {
-				          [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://github.com/jpd002/Play-#running-on-ios"]];
-			            }];
-			[alert addAction:helpAction];
-		}
-		[self presentViewController:alert animated:YES completion:nil];
+		MemFunc_InitJitArena();
+	}
+	if(IsJitAvailable()) return YES;
+
+	if(@available(iOS 26.0, *))
+	{
+		// Never boot the PS2 VM until the executable arena is confirmed ready.
+		[self beginStikDebugJitLaunch:sender];
 		return NO;
 	}
-	return YES;
+
+	UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"JIT unavailable" message:@"JIT doesn't seem to be available at the moment. If JIT is not available, the emulator will crash. Do you wish to continue?" preferredStyle:UIAlertControllerStyleAlert];
+	[alert addAction:[UIAlertAction actionWithTitle:@"Continue" style:UIAlertActionStyleDefault handler:^(UIAlertAction*) {
+	  [self performSegueWithIdentifier:@"showEmulator" sender:sender];
+	}]];
+	[alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction*){}]];
+	[self presentViewController:alert animated:YES completion:nil];
+	return NO;
 }
 
 - (void)prepareForSegue:(UIStoryboardSegue*)segue sender:(id)sender
