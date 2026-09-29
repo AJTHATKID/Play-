@@ -1,9 +1,9 @@
 name: Build iOS
 
-on: [push, pull_request]
+on: [push]
 jobs:
   build_ios:
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
     - name: Install dpkg
       run: |
