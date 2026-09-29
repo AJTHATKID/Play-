@@ -123,3 +123,74 @@ replace_exact(
 )
 
 print("StikDebug iOS 27 hardening patch applied successfully")
+
+
+# 6) Dedicated Play!/FlekDeck fallback: if StikDebug is opened directly because
+# iOS refused the custom URL scheme, find the running FlekDeck host and attach
+# universal.js automatically.
+replace_exact(
+    "StikDebug/Views/HomeView.swift",
+    """        if let config = pendingJITEnableConfiguration {
+            startJITInBackground(
+                bundleID: config.bundleID,
+                pid: config.pid,
+                scriptData: config.scriptData,
+                scriptName: config.scriptName,
+                triggeredByURLScheme: true
+            )
+            pendingJITEnableConfiguration = nil
+        }
+    }
+""",
+    """        if let config = pendingJITEnableConfiguration {
+            startJITInBackground(
+                bundleID: config.bundleID,
+                pid: config.pid,
+                scriptData: config.scriptData,
+                scriptName: config.scriptName,
+                triggeredByURLScheme: true
+            )
+            pendingJITEnableConfiguration = nil
+            return
+        }
+
+        autoAttachToPlayHostIfRunning()
+    }
+
+    private func autoAttachToPlayHostIfRunning() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let deadline = Date().addingTimeInterval(12)
+            var target: ProcessInfoEntry? = nil
+
+            while Date() < deadline, target == nil {
+                if TunnelManager.shared.isConnected || MountingProgress.shared.coolisMounted {
+                    var lookupError: NSError?
+                    let entries = ProcessInfoEntry.currentEntries(&lookupError)
+                    target = entries.first(where: { entry in
+                        let bundle = (entry.bundleID ?? "").lowercased()
+                        let name = (entry.name ?? entry.displayName).lowercased()
+                        return bundle.contains("flek") || name.contains("flekdeck")
+                    })
+                }
+                if target == nil {
+                    usleep(250_000)
+                }
+            }
+
+            guard let target else { return }
+            let scriptInfo = ScriptStore.script(named: "universal.js")
+            DispatchQueue.main.async {
+                startJITInBackground(
+                    bundleID: target.bundleID,
+                    pid: target.pid,
+                    scriptData: scriptInfo?.data,
+                    scriptName: scriptInfo?.name ?? "universal.js",
+                    triggeredByURLScheme: true,
+                    displayName: "Play! / FlekDeck"
+                )
+            }
+        }
+    }
+""",
+    "auto-attach FlekDeck"
+)
