@@ -9,6 +9,52 @@
 #import "CoverViewCell.h"
 #import "AltServerJitService.h"
 #include "../../deps/CodeGen/include/MemoryFunction.h"
+#include <dlfcn.h>
+
+static NSString* GetProcessBundleIDForStikDebug()
+{
+	// LiveContainer/FlekDeck can spoof NSBundle.mainBundle to the guest app.
+	// StikDebug needs the bundle ID of the actual installed host process so it
+	// can return to it after attaching by PID. Read that from the process's own
+	// application-identifier entitlement instead.
+	void* security = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY);
+	if(security != nullptr)
+	{
+		typedef void* (*SecTaskCreateFromSelfFn)(CFAllocatorRef);
+		typedef CFTypeRef (*SecTaskCopyValueForEntitlementFn)(void*, CFStringRef, CFErrorRef*);
+		auto createTask = reinterpret_cast<SecTaskCreateFromSelfFn>(dlsym(security, "SecTaskCreateFromSelf"));
+		auto copyEntitlement = reinterpret_cast<SecTaskCopyValueForEntitlementFn>(dlsym(security, "SecTaskCopyValueForEntitlement"));
+		if(createTask && copyEntitlement)
+		{
+			void* task = createTask(nullptr);
+			if(task)
+			{
+				CFTypeRef value = copyEntitlement(task, CFSTR("application-identifier"), nullptr);
+				if(value && CFGetTypeID(value) == CFStringGetTypeID())
+				{
+					char buffer[1024] = {};
+					if(CFStringGetCString((CFStringRef)value, buffer, sizeof(buffer), kCFStringEncodingUTF8))
+					{
+						NSString* applicationIdentifier = [NSString stringWithUTF8String:buffer];
+						NSRange firstDot = [applicationIdentifier rangeOfString:@"."];
+						if(firstDot.location != NSNotFound && (firstDot.location + 1) < applicationIdentifier.length)
+						{
+							NSString* hostBundleID = [applicationIdentifier substringFromIndex:(firstDot.location + 1)];
+							CFRelease(value);
+							CFRelease((CFTypeRef)task);
+							dlclose(security);
+							return hostBundleID;
+						}
+					}
+				}
+				if(value) CFRelease(value);
+				CFRelease((CFTypeRef)task);
+			}
+		}
+		dlclose(security);
+	}
+	return [[NSBundle mainBundle] bundleIdentifier];
+}
 
 static bool IsJitAvailable()
 {
@@ -197,7 +243,7 @@ static NSString* const reuseIdentifier = @"coverCell";
 
 - (void)beginStikDebugJitLaunch:(id)sender
 {
-	NSString* bundleID = [[NSBundle mainBundle] bundleIdentifier];
+	NSString* bundleID = GetProcessBundleIDForStikDebug();
 	if(bundleID == nil) return;
 
 	UIAlertController* progressAlert =
