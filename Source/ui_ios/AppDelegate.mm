@@ -2,6 +2,7 @@
 #import "EmulatorViewController.h"
 #include "../gs/GSH_OpenGL/GSH_OpenGL.h"
 #include "DebuggerSimulator.h"
+#include "../../deps/CodeGen/include/MemoryFunction.h"
 
 @interface AppDelegate ()
 
@@ -11,6 +12,7 @@
 
 - (BOOL)application:(UIApplication*)application didFinishLaunchingWithOptions:(NSDictionary*)launchOption
 {
+	MemFunc_InitJitArena();
 	[EmulatorViewController registerPreferences];
 	CGSH_OpenGL::RegisterPreferences();
 	return YES;
