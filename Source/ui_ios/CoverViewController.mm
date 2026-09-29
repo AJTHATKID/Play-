@@ -8,9 +8,11 @@
 #import "BackgroundLayer.h"
 #import "CoverViewCell.h"
 #import "AltServerJitService.h"
+#include "../../deps/CodeGen/include/MemoryFunction.h"
 
 static bool IsJitAvailable()
 {
+	if(MemFunc_IsJitReady()) return true;
 	//If ppid != 1, it means we're being run in the debugger
 	if(getppid() != 1) return true;
 	if([[AltServerJitService sharedAltServerJitService] jitEnabled])
